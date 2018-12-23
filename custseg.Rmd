@@ -1,0 +1,470 @@
+---
+title: "Audience Segmentation"
+output:
+  word_document: default
+  html_notebook: default
+  pdf_document: default
+  html_document: default
+---
+
+## Read fake data
+This data is simulated for a client proposal
+
+```{r}
+seg.raw <- read.csv("http://goo.gl/qw303p")
+seg.df  <- seg.raw[ , -7]     # a copy without the known segment assignments
+
+summary(seg.df)
+```
+
+```{r}
+str(seg.df)
+```
+
+
+
+### Build clustering solution
+
+```{r}
+# now the real hclust() work
+library(cluster)                  # daisy works with mixed data types
+seg.dist <- daisy(seg.df)
+# inspect some of the results
+as.matrix(seg.dist)[1:5, 1:5]
+
+seg.hc <- hclust(seg.dist, method="complete")
+
+plot(seg.hc)
+```
+A hierarchical dendrogram is interpreted primarily by height and where observations are joined. The height represents the dissimilarity between elements that are joined.
+
+Let us zoom into one section of the chart
+```{r}
+plot(cut(as.dendrogram(seg.hc), h=0.5)$lower[[1]])
+```
+Check the proposed similarities
+
+```{r}
+# check some of the proposed similarities
+seg.df[c(101, 107), ]  # similar
+seg.df[c(278, 294), ]  # similar
+seg.df[c(173, 141), ]  # less similar
+```
+As you can see, these segments seem quite similar.
+
+
+```{r}
+# examine cophenetic correlation
+cor(cophenetic(seg.hc), seg.dist)
+```
+
+CPCC > 0.7 indicates a relatively strong fit, meaning that the hierarchical tree represents the distances
+between customers well.
+
+Let us try to cut the dendrogram such that we get 4 clusters
+
+```{r}
+plot(seg.hc)
+rect.hclust(seg.hc, k=4, border="red")
+# actually get 4 groups
+seg.hc.segment <- cutree(seg.hc, k=4)     # membership vector for 4 groups
+table(seg.hc.segment)
+```
+
+We see that groups 1 and 2 dominate the assignment. Note that the class labels (1, 2, 3, 4) are in arbitrary order and are not meaningful in themselves. seg.hc.segment is the vector of group assignments.
+
+```{r}
+library(dplyr)
+seg.df$seg.hc.segment = seg.hc.segment
+seg.summ <- function(data, groups) {
+  aggregate(data, list(groups), function(x) mean(as.numeric(x)))  
+}
+
+numeric_mean <- function(col){
+  return (mean(as.numeric(col)))
+}
+seg.df %>% group_by(seg.hc.segment) %>% summarize_each(funs(numeric_mean))
+#seg.summ(data = seg.df,groups = seg.hc.segment)
+```
+
+
+```{r}
+# plot this
+plot(jitter(as.numeric(seg.df$gender)) ~ jitter(as.numeric(seg.df$subscribe)), 
+     col=seg.hc.segment, yaxt="n", xaxt="n", ylab="", xlab="")
+axis(1, at=c(1, 2), labels=c("Subscribe: No", "Subscribe: Yes"))
+axis(2, at=c(1, 2), labels=levels(seg.df$gender))
+
+```
+
+### Perform k-means clustering
+
+```{r}
+# convert factor variables to numeric (kmeans requires). OK b/c all are binary.
+seg.df.num <- seg.df
+seg.df.num$gender    <- ifelse(seg.df$gender=="Male", 0, 1)
+seg.df.num$ownHome   <- ifelse(seg.df$ownHome=="ownNo", 0, 1)
+seg.df.num$subscribe <- ifelse(seg.df$subscribe=="subNo", 0, 1)
+summary(seg.df.num)
+
+set.seed(96743)
+seg.k <- kmeans(seg.df.num, centers=4)
+```
+
+```{r}
+# inspect it
+seg.summ(seg.df, seg.k$cluster)
+
+# plot one of the variables
+boxplot(seg.df.num$income ~ seg.k$cluster, ylab="Income", xlab="Cluster")
+boxplot(seg.df.num$age ~ seg.k$cluster, ylab="Age", xlab="Cluster")
+
+```
+
+### Scree Plot
+Draw a scree plot to determine the number of clusters.
+
+```{r}
+wssplot <- function(data, nc=15, seed=1234){
+  wss <- (nrow(data)-1)*sum(apply(data,2,var))
+  for (i in 2:nc){
+    set.seed(seed)
+    wss[i] <- sum(kmeans(data, centers=i)$withinss)}
+  plot(1:nc, wss, type="b", xlab="Number of Clusters",
+       ylab="Within groups sum of squares")}
+
+wssplot(seg.df.num, nc=6) 
+```
+
+
+
+
+### Plot the results
+```{r}
+# plot the result
+library(cluster)
+clusplot(seg.df, seg.k$cluster, color=TRUE, shade=TRUE, 
+         labels=4, lines=0, main="K-means cluster plot")
+```
+
+Overall, this is a far more interesting cluster solution for our segmentation data than the hclust() proposal. The groups here are clearly differentiated on key variables such as age and income.With this information, an analyst might cross-reference the group membership with key variables (as we did using our seg.summ() function and then look at the relative differentiation of the groups.
+
+This may suggest a business strategy. In the present case, for instance, we see that group 1 is modestly well differentiated, and has the highest average income. That may make it a good target for a potential campaign. Many other strategies are possible, too; the key point is that the analysis provides interesting options to
+consider.
+A limitation of k-means analysis is that it requires specifying the number of clusters, and it can be difficult to determine whether one solution is better than another. If we were to use k-means for the present problem, we would repeat the analysis for k =3, 4, 5, and so forth, and determine which solution gives the most useful result for our business goals.
+One might wonder whether the algorithm itself can suggest how many clusters are in the data. Yes! To see that, we turn next to model-based clustering.
+
+### Model Based Clustering (MCLUST)
+
+The key idea for model-based clustering is that observations come from groups with different statistical distributions (such as different means and variances). The algorithms try to find the best set of such underlying distributions to explain the observed data. We use the mclust package to demonstrate this.
+Such models are also known as "mixture models" because it is assumed that the data reflect a mixture of observations drawn from different populations, although we don't know which population each observation was drawn from. We are trying to estimate the underlying population parameters and the mixture proportion. mclust models such clusters as being drawn from a mixture of normal (also known as Gaussian) distributions.
+As you might guess, because mclust models data with normal distributions, it uses only numeric data. We use the numeric data frame seg.df.num that we adapted for kmeans(). The model is estimated with Mclust()
+
+```{r}
+# do mclust for segments
+library(mclust)
+
+###
+# convert factor variables to numeric (mclust requires). OK b/c all are binary.
+# these lines are the same as above for k-means [not repeated in book]
+seg.df.num <- seg.df
+seg.df.num$gender    <- ifelse(seg.df$gender=="Male", 0, 1)
+seg.df.num$ownHome   <- ifelse(seg.df$ownHome=="ownNo", 0, 1)
+seg.df.num$subscribe <- ifelse(seg.df$subscribe=="subNo", 0, 1)
+summary(seg.df.num)
+###
+
+
+# fit the model
+seg.mc <- Mclust(seg.df.num)
+summary(seg.mc)
+```
+```{r}
+# what if we estimate 4 clusters?
+seg.mc4 <- Mclust(seg.df.num, G=4)
+summary(seg.mc4)
+```
+# Develop a 3 cluster model
+
+```{r}
+# fit the model
+seg.mc3 <- Mclust(seg.df.num, G=3)
+summary(seg.mc3)
+```
+
+
+# Compare the two models
+
+```{r}
+# compare the three models
+logLik(seg.mc, seg.mc3, seg.mc4)
+```
+```{r}
+# examine the 3-cluster model
+seg.summ(seg.df, seg.mc3$class)
+```
+### Plot the 2-cluster model
+
+```{r}
+# plot the 3-cluster model
+library(cluster)
+clusplot(seg.df, seg.mc$class, color=TRUE, shade=TRUE, 
+         labels=4, lines=0, main="Model-based cluster plot")
+```
+
+### Latent Class Analysis: poLCA()
+Latent class analysis (LCA) is similar to mixture modeling in the assumption that differences are attributable to unobserved groups that one wishes to uncover. In this section we take a look at the poLCA package for polytomous (i.e., categorical) LCA. Whereas mclust and kmeans() work with numeric data, and hclust() depends on the distance measure, poLCA uses only categorical variables. To demonstrate it here, we adopt an opposite strategy from our procedure with k-means and mclust and convert our data seg.df to be all categorical data before analyzing it.
+
+
+There are several approaches to convert numeric data to factors, but for purposes here we simply recode everything as binary with regard to a specified cutting point (for instance, to recode as 1 for income below some cutoff and 2 above that). In the present case, we split each variable at the median() and recode using ifelse() and factor().
+We use with() to save typing, and ~1   to specify a formula with intercepts only:
+
+
+```{r}
+seg.df.cut <- seg.df
+seg.df.cut$age    <- factor(ifelse(seg.df$age < median(seg.df$age), 1, 2))
+seg.df.cut$income <- factor(ifelse(seg.df$income < median(seg.df$income),
+                                   1, 2))
+seg.df.cut$kids   <- factor(ifelse(seg.df$kids < median(seg.df$kids), 1, 2))
+summary(seg.df.cut)
+
+# create a model formula
+seg.f <- with(seg.df.cut, 
+              cbind(age, gender, income, kids, ownHome, subscribe)~1)
+```
+With the data in place, we specify the model that we want to fit. poLCA can estimate complex models with covariates, but for the present analysis we only wish Segmentation: Clustering and Classification
+to examine the effect of cluster membership alone. Thus, we model the dependent variables (all the observed columns) with respect to the model intercepts (i.e., the cluster positions).
+
+```{r}
+# fit the model
+library(poLCA)
+set.seed(02807)
+seg.LCA3 <- poLCA(seg.f, data=seg.df.cut, nclass=3)
+seg.LCA4 <- poLCA(seg.f, data=seg.df.cut, nclass=4)
+
+seg.LCA4$bic
+seg.LCA3$bic
+```
+
+The 3-cluster model shows a lower BIC by 32 and thus a substantially stronger fit to the data. As we've seen, that is not entirely conclusive as to business utility, so we also examine some other indicators such as the quick summary function and cluster plots:
+
+```{r}
+# examine the solutions
+# 3 clusters
+seg.summ(seg.df, seg.LCA3$predclass)
+
+seg.summ(seg.df, seg.LCA4$predclass)
+
+table(seg.LCA3$predclass)
+
+table(seg.LCA4$predclass)
+
+clusplot(seg.df, seg.LCA3$predclass, color=TRUE, shade=TRUE, 
+         labels=4, lines=0, main="LCA plot (K=3)")
+
+clusplot(seg.df, seg.LCA4$predclass, color=TRUE, shade=TRUE, 
+         labels=4, lines=0, main="LCA plot (K=4)")
+```
+
+At a high level, it appears that "Group 2" is similar in both solutions. The primary difference is that "Group 3" buried inside the overlapping ellipses in the 4-cluster solution could be viewed as being largely carved out of two larger groups (Groups "2" and "3" as labeled in the 3-cluster solution). This is an approximate interpretation of the data visualization, not a perfect correspondence.
+
+Does the additional group in the 4-cluster solution add anything to our interpretation?
+Turning to the quick summary from seg.summ() in the code block, we see good differentiation of groups in both models. One argument in favor of the 4-cluster solution is that Group 3 has no subscribers (as shown by the mean in the seg.summ() results) and is relatively well identified (mostly younger women with no kids); that might make it an appealing group either for targeting or exclusion, depending on one's strategy.
+
+
+### Comparing Cluster Solutions
+
+mapClass() solves the matching problem. It examines all permutations of how two sets of class assignments might be related and selects a mapping that maximizes agreement between the two assignment schemes. adjustedRandIndex() likewise matches two assignment schemes and then computes the degree of agreement over and above what might be attributed to "chance" by simply assigning all observations to the largest group [81, 131]. Its magnitude may be interpreted similarly to a standard r correlation coefficient.
+
+We use table() to look at the cross-tabs between the LCA 3-cluster and 4-cluster solutions found above:
+
+```{r}
+# compare 3-cluster and 4-cluster solutions
+table(seg.LCA3$predclass, seg.LCA4$predclass)
+```
+
+It would appear that observations assigned to "Group 1" in the 3-cluster solution are split between Groups 1, 3, and 4 in the 4-cluster solution, while "Group 3" maps closely to "Group 1" (in the 4 class solution) and "Group
+2" is predominantly the same in both. However, matching groups manually is sometimes unclear and generally error-prone. Instead, we use mapClass (a, b) and adjustedRandIndex(a, b) to compare agreement between the
+two solutions:
+
+```{r}
+library(mclust)
+mapClass(seg.LCA3$predclass, seg.LCA4$predclass)
+adjustedRandIndex(seg.LCA3$predclass, seg.LCA4$predclass)
+```
+
+This tells us that "1" in the LCA3 model (a) maps best to "4" in the LCA4 model (b), and so forth. The adjusted Rand index of 0.729 indicates that the match between the two assignment lists is much better than chance. From a business perspective, it also tells us that the 3-cluster and 4-cluster differ modestly from one another, which
+provides another perspective on choosing between them.
+
+```{r}
+# compare random assignment to LCA4
+set.seed(11021)
+random.data <- sample(4, length(seg.LCA4$predclass), replace=TRUE)
+adjustedRandIndex(random.data, seg.LCA4$predclass)
+```
+
+In this case, the adjusted Rand index is near zero, because the match between the clusters is no better than random chance.
+
+Finally we compare the LCA 4-cluster solution to the true segments in seg.raw:
+```{r}
+# compare to known segments
+table(seg.raw$Segment, seg.LCA4$predclass)
+adjustedRandIndex(seg.raw$Segment, seg.LCA4$predclass)
+```
+
+With a Rand index of 0.35, the LCA solution matches the true segment assignments moderately better than chance alone. In many cases, of course, one would not have identified clusters for comparison; but when they are available from other projects or previous efforts, it is helpful to examine correspondence in this way.
+
+#### Using CLASSIFICATION
+
+First, we will use Naive Bayes.
+
+```{r}
+set.seed(04625)
+train.prop  <- 0.65
+train.cases <- sample(nrow(seg.raw), nrow(seg.raw)*train.prop)
+seg.df.train <- seg.raw[train.cases, ]
+seg.df.test  <- seg.raw[-train.cases, ]
+library(e1071)
+(seg.nb <- naiveBayes(Segment ~ ., data=seg.df.train))
+(seg.nb.class <- predict(seg.nb, seg.df.test))
+
+# frequencies in predicted data
+prop.table(table(seg.nb.class))
+
+# plot it
+clusplot(seg.df.test[, -7], seg.nb.class, color=TRUE, shade=TRUE, 
+         labels=4, lines=0, 
+         main="Naive Bayes classification, holdout data")
+```
+```{r}
+# compare to known segments (which we can do with this test data)
+mean(seg.df.test$Segment==seg.nb.class)
+```
+
+```{r}
+# adjusted for chance
+library(mclust)
+adjustedRandIndex(seg.nb.class, seg.df.test$Segment)
+
+table(seg.nb.class, seg.df.test$Segment)
+```
+
+
+```{r}
+# summary data for proposed segments in the test data
+seg.summ(seg.df.test, seg.nb.class)
+# summary data for the known segments in the test data
+seg.summ(seg.df.test, seg.df.test$Segment)
+```
+
+```{r}
+# predict raw probabilities
+predict(seg.nb, seg.df.test, type="raw")
+```
+
+```{r}
+library(randomForest)
+set.seed(98040)
+
+(seg.rf <- randomForest(Segment ~ ., data=seg.df.train))
+
+
+# predict the test data for random forest
+seg.rf.class <- predict(seg.rf, seg.df.test)
+
+# plot the solution
+library(cluster)
+
+clusplot(seg.df.test[, -7], seg.rf.class, color=TRUE, shade=TRUE, 
+         labels=4, lines=0, main="Random Forest classification, holdout data")
+
+# get the individual prediction distribution
+seg.rf.class.all <- predict(seg.rf, seg.df.test, predict.all=TRUE)
+
+# look at the distribution for the first 5 test data cases
+apply(seg.rf.class.all$individual[1:5, ], 1, table)
+
+# summaries for the proposed and actual segments
+seg.summ(seg.df.test, seg.rf.class)
+seg.summ(seg.df.test, seg.df.test$Segment)
+
+# confusion matrix in test data
+mean(seg.df.test$Segment==seg.rf.class)
+table(seg.df.test$Segment, seg.rf.class)
+
+library(mclust)
+adjustedRandIndex(seg.df.test$Segment, seg.rf.class)
+
+
+### random forest variable importance
+set.seed(98040)
+(seg.rf <- randomForest(Segment ~ ., data=seg.df.train, ntree=3000,
+                        importance=TRUE))
+
+importance(seg.rf)
+
+varImpPlot(seg.rf, main="Variable importance by segment")
+
+library(gplots)
+library(RColorBrewer)
+
+
+heatmap.2(t(importance(seg.rf)[ , 1:4]), 
+          col=brewer.pal(9, "Blues"), 
+          dend="none", trace="none", key=FALSE,
+          margins=c(10, 10),
+          main="Variable importance by segment"
+          )
+
+
+
+#### predict subscription status
+
+#### using random forest
+
+set.seed(92118)
+train.prop  <- 0.65
+train.cases <- sample(nrow(seg.df), nrow(seg.df)*train.prop)
+sub.df.train <- seg.raw[train.cases, ]
+sub.df.test  <- seg.raw[-train.cases, ]
+
+
+# see how differentiated the subscribers are, in the training data
+
+clusplot(sub.df.train[, -6], sub.df.train$subscribe, color=TRUE, shade=TRUE, 
+         labels=4, lines=0, main="Subscriber clusters, training data")
+```
+
+### Prediction: Identifying potential Customers*
+
+We now turn to another use for classification: to predict potential customers. An important business question-especially in high-churn categories such as mobile subscriptions-is how to reach new customers. If we have data on past prospects that includes potential predictors such as demographics, and an outcome such as
+purchase, we can develop a model to identify customers for whom the outcome is most likely among new prospects. In this section, we use a random forest model and attempt to predict subscription status from our data set seg.df.
+As usual with classification problems, we split the data into a training sample and a test sample:
+
+```{r}
+library(randomForest)
+set.seed(11954)
+(sub.rf <- randomForest(subscribe ~ ., data=sub.df.train, ntree=3000))
+
+# try again with more trees, and balanced classes using sampsize
+set.seed(11954)
+(sub.rf <- randomForest(subscribe ~ ., data=sub.df.train, ntree=3000, 
+                       sampsize=c(25, 25)) )
+
+# predict the holdout data
+sub.rf.sub <- predict(sub.rf, sub.df.test)
+# confusion matrix
+table(sub.rf.sub, sub.df.test$subscribe)
+
+library(mclust)
+adjustedRandIndex(sub.rf.sub, sub.df.test$subscribe)
+
+library(psych)
+cohen.kappa(cbind(sub.rf.sub, sub.df.test$subscribe))
+```
+
+With an adjusted Rand Index = 0.19 and Cohen's kappa = 0.26 (confidence interval 0.025-0.50), the model identifies subscribers in the test data modestly better than chance.
+
+How could we further improve prediction? We would expect to improve predictive ability if we had more data: additional observations of the subscriber group and additional predictor variables. We have described prediction using a random forest model, but there are many other approaches such as logistic regression and other machine learning algorithms 
+
+With a difficult problem-predicting a low incidence group, in data where the groups are not well-differentiated, and with a small sample-the random forest model performs modestly yet perhaps surprisingly well. There are no magic bullets in predictive modeling, but if you use the many tools available in R, avoid pitfalls such as class imbalance, and interpret results in terms of the business action, you will have good odds to achieve positive results.
