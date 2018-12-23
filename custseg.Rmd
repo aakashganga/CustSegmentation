@@ -11,7 +11,7 @@ output:
 This data is simulated for a client proposal
 
 ```{r}
-seg.raw <- read.csv("http://goo.gl/qw303p")
+seg.raw <- read.csv("CRMData.csv")
 seg.df  <- seg.raw[ , -7]     # a copy without the known segment assignments
 
 summary(seg.df)
